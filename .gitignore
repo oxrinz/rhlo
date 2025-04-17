@@ -1,0 +1,17 @@
+.zig-cache/
+zig-out/
+/release/
+/debug/
+/build/
+/build-*/
+/docgen_tmp/
+
+zig-cache/
+
+.ryuthon-cache/
+
+main.ryu
+gpu.ryu
+comp.sh
+
+**/**.a
