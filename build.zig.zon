@@ -2,6 +2,12 @@
     .name = .rhlo,
 
     .version = "0.0.0",
+    .dependencies = .{
+        .rllvm = .{
+            .url = "git+https://github.com/oxrinz/rllvm#0be88faa506b8dfc2d7c55d5df4af365e1886441",
+            .hash = "N-V-__8AAFz7AgCgFAFdGQg_N40u5m3-jYbnmOTNELJ1YiDC",
+        },
+    },
 
     .fingerprint = 0xb2f375f19eaa9f66,
 

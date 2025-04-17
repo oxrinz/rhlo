@@ -1,11 +1,12 @@
 const std = @import("std");
 
-const llvm = @import("llvm");
-const target = llvm.target;
-const target_machine_mod = llvm.target_machine;
-const types = llvm.types;
-const core = llvm.core;
-const execution = llvm.engine;
+const rllvm = @import("rllvm");
+const cuda = rllvm.cuda;
+const target = rllvm.llvm.target;
+const target_machine_mod = rllvm.llvm.target_machine;
+const types = rllvm.llvm.types;
+const core = rllvm.llvm.core;
+const execution = rllvm.llvm.engine;
 
 const nodes = @import("nodes.zig");
 pub const buffers = @import("buffers.zig");
@@ -40,6 +41,29 @@ test "anoda one" {
     const param1 = try builder.paramemeter(dtype, shape);
 
     _ = try builder.opAdd(param0, param1);
+}
+
+test "cuda" {
+    _ = target.LLVMInitializeNativeTarget();
+    _ = target.LLVMInitializeNativeAsmPrinter();
+    _ = target.LLVMInitializeNativeAsmParser();
+
+    const module = core.LLVMModuleCreateWithName("main");
+
+    var param_types: [2]types.LLVMTypeRef = .{
+        core.LLVMInt32Type(),
+        core.LLVMInt32Type(),
+    };
+    const fn_type = core.LLVMFunctionType(core.LLVMInt32Type(), &param_types, 2, 0);
+    const function = core.LLVMAddFunction(module, "add", fn_type);
+
+    const entry = core.LLVMAppendBasicBlock(function, "entry");
+
+    const builder = core.LLVMCreateBuilder();
+    defer core.LLVMDisposeBuilder(builder);
+    core.LLVMPositionBuilderAtEnd(builder, entry);
+
+    cuda.callCuInit(module, builder);
 }
 
 test "fuck" {
