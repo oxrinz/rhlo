@@ -1,19 +1,19 @@
 const std = @import("std");
 
-pub const Register = struct {
-    name: []const u8,
-    type: DataType,
-};
+pub const Register = []const u8;
 
 pub const Immediate = union(enum) {
     integer: i64,
     float: f64,
 };
 
+pub const Param = []const u8;
+
 pub const Operand = union(enum) {
     register: Register,
     immediate: Immediate,
     memory: MemoryRef,
+    parameter: Param,
 };
 
 pub const MemoryRef = struct {
@@ -34,13 +34,30 @@ pub const DataType = enum {
     f32,
     f64,
     pred,
+
+    pub fn toString(self: DataType) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub const SpaceType = enum {
+    global,
+    shared,
+    local,
+    param,
+
+    pub fn toString(self: SpaceType) []const u8 {
+        return @tagName(self);
+    }
 };
 
 pub const Instruction = union(enum) {
     add: AddInst,
     ld: LoadInst,
+    st: StoreInst,
     bra: BranchInst,
-    ret: void,
+    cvta: ConvertToAddrInst,
+    ret,
 };
 
 pub const AddInst = struct {
@@ -53,6 +70,15 @@ pub const AddInst = struct {
 pub const LoadInst = struct {
     dest: Operand,
     src: Operand,
+    type: DataType,
+    space: SpaceType,
+};
+
+pub const StoreInst = struct {
+    dest: Operand,
+    src: Operand,
+    type: DataType,
+    space: SpaceType,
 };
 
 pub const BranchInst = struct {
@@ -60,11 +86,18 @@ pub const BranchInst = struct {
     predicate: ?Operand,
 };
 
+pub const ConvertToAddrInst = struct {
+    to_generic: bool,
+    space: SpaceType,
+    type: DataType,
+    dest: Operand,
+    src: Operand,
+};
+
 pub const Kernel = struct {
     name: []const u8,
     params: []Parameter,
     body: []Instruction,
-    registers: []Register,
     directives: []Directive,
 };
 

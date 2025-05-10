@@ -4,8 +4,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .rllvm = .{
-            .url = "git+https://github.com/oxrinz/rllvm#b43ae4af1e7ad6cdd331324512f91de9b571b378",
-            .hash = "N-V-__8AAPYgAwAiNhG8dtS_GKyiul_BqQ77uha7RI4C_iVn",
+            .url = "git+https://github.com/oxrinz/rllvm#bd98e6cce313b6cec8c08d83a9cb29160d06bb03",
+            .hash = "N-V-__8AAPIgAwBSfDRmgA86srHgiLhZpayYef8kzqR2Y1a3",
         },
     },
 

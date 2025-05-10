@@ -13,12 +13,17 @@ pub const Builder = struct {
         };
     }
 
-    pub fn paramemeter(self: *Builder, dtype: nodes.DataType, shape: nodes.Shape) !nodes.TensorRef {
+    pub fn createParameterFromRef(self: *Builder, ref: nodes.TensorRef) !void {
+        try self.program.params.append(ref);
+    }
+
+    pub fn createParameter(self: *Builder, dtype: nodes.DataType, shape: nodes.Shape) !nodes.TensorRef {
         const param_id = self.program.tensor_store.items.len;
         try self.program.tensor_store.append(.{
             .dtype = dtype,
             .dimensions = shape,
         });
+        try self.program.params.append(param_id);
 
         return param_id;
     }
@@ -36,9 +41,16 @@ pub const Builder = struct {
             .dtype = a_tensor.dtype,
         });
 
+        const input_ids = try self.allocator.alloc(usize, 2);
+        input_ids[0] = a;
+        input_ids[1] = b;
+
+        const output_ids = try self.allocator.alloc(usize, 1);
+        output_ids[0] = output_id;
+
         try self.program.ops.append(.{
-            .input_ids = &[_]usize{ a, b },
-            .output_ids = &[_]usize{output_id},
+            .input_ids = input_ids,
+            .output_ids = output_ids,
             .kind = .Add,
         });
 

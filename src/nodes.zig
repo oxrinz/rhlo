@@ -27,15 +27,13 @@ pub const Operation = struct {
 pub const RHLOProgram = struct {
     tensor_store: std.ArrayList(Tensor),
     ops: std.ArrayList(Operation),
-    input_ids: std.ArrayList(usize),
-    output_ids: std.ArrayList(usize),
+    params: std.ArrayList(usize),
 
     pub fn init(allocator: std.mem.Allocator) !RHLOProgram {
         return .{
             .tensor_store = std.ArrayList(Tensor).init(allocator),
             .ops = std.ArrayList(Operation).init(allocator),
-            .input_ids = std.ArrayList(usize).init(allocator),
-            .output_ids = std.ArrayList(usize).init(allocator),
+            .params = std.ArrayList(usize).init(allocator),
         };
     }
 };
