@@ -16,69 +16,19 @@ pub fn generatePTX(module: types.LLVMModuleRef, program: nodes.RHLOProgram) !typ
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var params = std.ArrayList(ptxast.Parameter).init(allocator);
-    var body = std.ArrayList(ptxast.Instruction).init(allocator);
-    var directives = std.ArrayList(ptxast.Directive).init(allocator);
+    var generator = try Generator.init(allocator, module, program);
 
-    const reg_r_decl = ptxast.Directive{ .reg = .{
-        .name = "%r",
-        .count = @intCast(program.tensor_store.items.len),
-        .type = .f32,
-    } };
-    const reg_rd_decl = ptxast.Directive{ .reg = .{
-        .name = "%rd",
-        .count = @intCast(program.params.items.len),
-        .type = .u64,
-    } };
-
-    try directives.append(reg_r_decl);
-    try directives.append(reg_rd_decl);
-
-    for (program.params.items, 0..) |param, idx| {
-        _ = param;
-        const name = try std.fmt.allocPrint(allocator, "param_{d}", .{idx});
-        try params.append(.{ .name = name, .type = .u64 });
-    }
-
-    for (params.items, 0..) |param, idx| {
-        const reg_string = try std.fmt.allocPrint(allocator, "%rd{d}", .{idx});
-        try body.append(.{ .ld = .{ .space = .param, .type = .u64, .src = .{ .parameter = param.name }, .dest = .{ .register = reg_string } } });
-        try body.append(.{ .cvta = .{ .to_generic = true, .space = .global, .type = .u64, .src = .{ .register = reg_string }, .dest = .{ .register = reg_string } } });
-    }
-
-    try body.append(.{ .ld = .{ .space = .global, .type = .f32, .dest = .{ .register = "%r0" }, .src = .{ .register = "%rd0" } } });
-    try body.append(.{ .ld = .{ .space = .global, .type = .f32, .dest = .{ .register = "%r1" }, .src = .{ .register = "%rd1" } } });
-    for (program.ops.items) |op| {
-        switch (op.kind) {
-            .Add => {
-                try body.append(.{
-                    .add = .{
-                        .type = .f32,
-                        .src1 = .{ .register = try std.fmt.allocPrint(allocator, "%r{d}", .{op.input_ids[0]}) },
-                        .src2 = .{ .register = try std.fmt.allocPrint(allocator, "%r{d}", .{op.input_ids[1]}) },
-                        .dest = .{ .register = try std.fmt.allocPrint(allocator, "%r{d}", .{op.output_ids[0]}) },
-                    },
-                });
-            },
-        }
-    }
-
-    try body.append(.{ .st = .{ .space = .global, .type = .f32, .dest = .{ .register = "%rd2" }, .src = .{ .register = try std.fmt.allocPrint(allocator, "%r{d}", .{program.tensor_store.items.len - 1}) } } });
-    try body.append(.ret);
-
-    const kernel = ptxast.Kernel{
-        .body = try body.toOwnedSlice(),
-        .directives = try directives.toOwnedSlice(),
-        .name = "main",
-        .params = try params.toOwnedSlice(),
-    };
+    const kernel = try generator.generatePTX();
 
     const globals = &[_]ptxast.GlobalDecl{};
     var kernels = [_]ptxast.Kernel{kernel};
     const ast = ptxast.PTXAst{ .allocator = allocator, .globals = globals, .kernels = &kernels };
     const ptx = try @import("./emission.zig").emit(allocator, ast);
 
-    std.debug.print("{s}\n", .{ptx});
+    const file = try std.fs.cwd().createFile("rhlo.ptx", .{});
+    defer file.close();
+
+    try file.writeAll(ptx);
 
     const kernel_len = ptx.len;
     const global_ptx_str = core.LLVMAddGlobal(module, core.LLVMPointerType(core.LLVMInt8Type(), 0), "ptx_str");
@@ -86,3 +36,430 @@ pub fn generatePTX(module: types.LLVMModuleRef, program: nodes.RHLOProgram) !typ
     core.LLVMSetInitializer(global_ptx_str, kernel_constant);
     return global_ptx_str;
 }
+
+const RegisterManager = struct {
+    allocator: std.mem.Allocator,
+    reg_r_count: usize = 0,
+    reg_rd_count: usize = 0,
+    reg_f_count: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) RegisterManager {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    pub fn getRegister(self: *RegisterManager, reg_type: enum { r, rd, f }) ![]const u8 {
+        switch (reg_type) {
+            .r => {
+                self.reg_r_count += 1;
+                return try std.fmt.allocPrint(self.allocator, "%r{d}", .{self.reg_r_count - 1});
+            },
+            .rd => {
+                self.reg_rd_count += 1;
+                return try std.fmt.allocPrint(self.allocator, "%rd{d}", .{self.reg_rd_count - 1});
+            },
+            .f => {
+                self.reg_f_count += 1;
+                return try std.fmt.allocPrint(self.allocator, "%f{d}", .{self.reg_f_count - 1});
+            },
+        }
+    }
+};
+
+const MemoryLoader = struct {
+    allocator: std.mem.Allocator,
+
+    generator: *Generator,
+
+    raw_tidx_reg: ?[]const u8 = null,
+    raw_tidy_reg: ?[]const u8 = null,
+    tidx_reg: ?[]const u8 = null,
+    tidy_reg: ?[]const u8 = null,
+
+    raw_params: std.ArrayList([]const u8),
+    param_address_regs: std.AutoHashMap(usize, []const u8),
+
+    local_offset: ?[]const u8 = null,
+    local_tensor_regs: std.AutoHashMap(usize, []const u8),
+
+    local_row_regs: std.AutoHashMap(usize, [][]const u8),
+    local_col_regs: std.AutoHashMap(usize, [][]const u8),
+
+    pub fn init(generator: *Generator, allocator: std.mem.Allocator) !MemoryLoader {
+        var memory_loader = MemoryLoader{
+            .generator = generator,
+            .allocator = allocator,
+            .raw_params = std.ArrayList([]const u8).init(allocator),
+            .local_tensor_regs = std.AutoHashMap(usize, []const u8).init(allocator),
+            .param_address_regs = std.AutoHashMap(usize, []const u8).init(allocator),
+            .local_row_regs = std.AutoHashMap(usize, [][]const u8).init(allocator),
+            .local_col_regs = std.AutoHashMap(usize, [][]const u8).init(allocator),
+        };
+
+        for (generator.program.params.items, 0..) |param, idx| {
+            const name = try std.fmt.allocPrint(allocator, "param_{d}", .{idx});
+            try memory_loader.raw_params.append(name);
+
+            const reg = try memory_loader.generator.reg_manager.getRegister(.rd);
+            try memory_loader.param_address_regs.put(param.id, reg);
+            try memory_loader.generator.body.append(.{ .ld = .{ .space = .param, .type = .u64, .src = .{ .parameter = name }, .dest = .{ .register = reg } } });
+        }
+
+        for (generator.program.params.items) |param| {
+            try memory_loader.generator.body.append(.{
+                .cvta = .{
+                    .to_generic = true,
+                    .space = .global,
+                    .type = .u64,
+                    .src = .{ .register = memory_loader.param_address_regs.get(param.id).? },
+                    .dest = .{ .register = memory_loader.param_address_regs.get(param.id).? },
+                },
+            });
+        }
+
+        return memory_loader;
+    }
+
+    fn loadLocalMatrixValue(self: *MemoryLoader, tensor_id: usize) ![]const u8 {
+        const address = try self.generator.reg_manager.getRegister(.rd);
+        try self.generator.body.append(.{ .add = .{
+            .type = .u64,
+            .dest = .{ .register = address },
+            .src1 = .{ .register = self.local_offset.? },
+            .src2 = .{ .register = self.local_tensor_regs.get(tensor_id).? },
+        } });
+
+        const dest = try self.generator.reg_manager.getRegister(.f);
+        try self.generator.body.append(.{
+            .ld = .{
+                .type = .f32,
+                .space = .global,
+                .dest = .{ .register = dest },
+                .src = .{
+                    .register = address,
+                },
+            },
+        });
+
+        return dest;
+    }
+
+    fn storeLocalMatrixValue(self: *MemoryLoader, tensor_id: usize, value_reg: []const u8) !void {
+        const address = try self.generator.reg_manager.getRegister(.rd);
+        try self.generator.body.append(.{ .add = .{
+            .type = .u64,
+            .dest = .{ .register = address },
+            .src1 = .{ .register = self.local_offset.? },
+            .src2 = .{ .register = self.param_address_regs.get(tensor_id).? },
+        } });
+        try self.generator.body.append(.{
+            .st = .{
+                .space = .global,
+                .type = .f32,
+                .dest = .{ .register = address },
+                .src = .{ .register = value_reg },
+            },
+        });
+    }
+
+    fn calculateLocalData(self: *MemoryLoader) !void {
+        self.raw_tidx_reg = try self.generator.reg_manager.getRegister(.r);
+        self.raw_tidy_reg = try self.generator.reg_manager.getRegister(.r);
+        self.tidx_reg = try self.generator.reg_manager.getRegister(.rd);
+        self.tidy_reg = try self.generator.reg_manager.getRegister(.rd);
+        try self.generator.body.append(.{
+            .mov = .{
+                .dest = .{ .register = self.raw_tidx_reg.? },
+                .src = .{ .register = "%tid.x" },
+                .type = .u32,
+            },
+        });
+        try self.generator.body.append(.{
+            .mov = .{
+                .dest = .{ .register = self.raw_tidy_reg.? },
+                .src = .{ .register = "%tid.y" },
+                .type = .u32,
+            },
+        });
+        try self.generator.body.append(.{
+            .mul = .{
+                .dest = .{ .register = self.tidx_reg.? },
+                .wide = true,
+                .src1 = .{ .register = self.raw_tidx_reg.? },
+                .src2 = .{
+                    .immediate = .{ .integer = 4 },
+                },
+                .type = .s32,
+            },
+        });
+        try self.generator.body.append(.{
+            .mul = .{
+                .dest = .{ .register = self.tidy_reg.? },
+                .wide = true,
+                .src1 = .{ .register = self.raw_tidy_reg.? },
+                .src2 = .{
+                    .immediate = .{ .integer = 4 },
+                },
+                .type = .s32,
+            },
+        });
+
+        self.local_offset = try self.generator.reg_manager.getRegister(.rd);
+        try self.generator.body.append(.{
+            .shl = .{
+                .type = .b64,
+                .dest = .{ .register = self.local_offset.? },
+                .src1 = .{ .register = self.tidy_reg.? },
+                .src2 = .{ .immediate = .{ .integer = @intCast(self.generator.program.tensor_store.items[0].dimensions[0] / 2) } },
+            },
+        });
+        try self.generator.body.append(.{ .add = .{
+            .type = .u64,
+            .dest = .{ .register = self.local_offset.? },
+            .src1 = .{ .register = self.local_offset.? },
+            .src2 = .{ .register = self.tidx_reg.? },
+        } });
+    }
+
+    fn getLocalMatrixRegister(self: *MemoryLoader, tensor_id: usize) ![]const u8 {
+        if (self.tidx_reg == null or self.tidy_reg == null) {
+            try self.calculateLocalData();
+        }
+
+        if (self.local_tensor_regs.get(tensor_id) == null) {
+            var reg: ?[]const u8 = null;
+            if (try self.checkIfInputParam(tensor_id) == true) {
+                try self.local_tensor_regs.put(tensor_id, self.param_address_regs.get(tensor_id).?);
+                reg = try self.loadLocalMatrixValue(tensor_id);
+            }
+            if (reg == null) reg = try self.generator.reg_manager.getRegister(.f);
+            try self.local_tensor_regs.put(tensor_id, reg.?);
+        }
+        return self.local_tensor_regs.get(tensor_id).?;
+    }
+
+    fn getLocalRowRegisters(self: *MemoryLoader, tensor_id: usize) ![][]const u8 {
+        const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
+        var regs = std.ArrayList([]const u8).init(self.allocator);
+
+        // tidy 0
+        // x 0
+        // 0
+        // 0
+        //
+        // tidy 0
+        // x 1
+        // 0
+        // 4
+
+        for (0..dims[0]) |x| {
+            const address = try self.generator.reg_manager.getRegister(.rd);
+            const dim_reg = try self.generator.reg_manager.getRegister(.r);
+            try self.generator.body.append(.{ .mov = .{
+                .type = .u32,
+                .dest = .{ .register = dim_reg },
+                .src = .{ .immediate = .{ .integer = @intCast(dims[1] * 4) } },
+            } });
+            try self.generator.body.append(.{ .mul = .{
+                .type = .u32,
+                .dest = .{ .register = address },
+                .src1 = .{ .register = dim_reg },
+                .src2 = .{ .register = self.raw_tidy_reg.? },
+                .wide = true,
+            } });
+            try self.generator.body.append(.{ .add = .{
+                .type = .u64,
+                .dest = .{ .register = address },
+                .src1 = .{ .register = address },
+                .src2 = .{ .immediate = .{ .integer = @intCast(4 * x) } },
+            } });
+            try self.generator.body.append(.{ .add = .{
+                .type = .u64,
+                .dest = .{ .register = address },
+                .src1 = .{ .register = address },
+                .src2 = .{ .register = self.param_address_regs.get(tensor_id).? },
+            } });
+
+            const dest = try self.generator.reg_manager.getRegister(.f);
+            try self.generator.body.append(.{
+                .ld = .{
+                    .type = .f32,
+                    .space = .global,
+                    .dest = .{ .register = dest },
+                    .src = .{
+                        .register = address,
+                    },
+                },
+            });
+
+            try regs.append(dest);
+        }
+
+        return try regs.toOwnedSlice();
+    }
+
+    fn getLocalColRegisters(self: *MemoryLoader, tensor_id: usize) ![][]const u8 {
+        const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
+        var regs = std.ArrayList([]const u8).init(self.allocator);
+
+        // tidx 1
+        // y 0
+        // 4
+        //
+
+        for (0..dims[1]) |y| {
+            const address = try self.generator.reg_manager.getRegister(.rd);
+            const dim_reg = try self.generator.reg_manager.getRegister(.r);
+            const intermediate = try self.generator.reg_manager.getRegister(.r);
+            try self.generator.body.append(.{ .mov = .{
+                .type = .u32,
+                .dest = .{ .register = dim_reg },
+                .src = .{ .immediate = .{ .integer = @intCast(dims[0] * (y)) } },
+            } });
+            try self.generator.body.append(.{ .add = .{
+                .type = .u32,
+                .dest = .{ .register = intermediate },
+                .src1 = .{ .register = dim_reg },
+                .src2 = .{ .register = self.raw_tidx_reg.? },
+            } });
+            try self.generator.body.append(.{ .mul = .{
+                .type = .u32,
+                .dest = .{ .register = address },
+                .src1 = .{ .register = intermediate },
+                .src2 = .{ .immediate = .{ .integer = 4 } },
+                .wide = true,
+            } });
+            try self.generator.body.append(.{ .add = .{
+                .type = .u64,
+                .dest = .{ .register = address },
+                .src1 = .{ .register = address },
+                .src2 = .{ .register = self.param_address_regs.get(tensor_id).? },
+            } });
+
+            const dest = try self.generator.reg_manager.getRegister(.f);
+            try self.generator.body.append(.{
+                .ld = .{
+                    .type = .f32,
+                    .space = .global,
+                    .dest = .{ .register = dest },
+                    .src = .{
+                        .register = address,
+                    },
+                },
+            });
+
+            try regs.append(dest);
+        }
+
+        return try regs.toOwnedSlice();
+    }
+
+    fn checkIfInputParam(self: *MemoryLoader, tensor_id: usize) !bool {
+        for (self.generator.program.params.items) |param| {
+            if (param.id == tensor_id and param.input == true) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+const Generator = struct {
+    allocator: std.mem.Allocator,
+    program: nodes.RHLOProgram,
+    module: types.LLVMModuleRef,
+
+    body: std.ArrayList(ptxast.Instruction),
+    directives: std.ArrayList(ptxast.Directive),
+
+    reg_manager: RegisterManager,
+    memory_loader: MemoryLoader,
+
+    pub fn init(allocator: std.mem.Allocator, module: types.LLVMModuleRef, program: nodes.RHLOProgram) !*Generator {
+        const generator_ptr = try allocator.create(Generator);
+        generator_ptr.* = Generator{
+            .allocator = allocator,
+            .program = program,
+            .module = module,
+            .body = std.ArrayList(ptxast.Instruction).init(allocator),
+            .directives = std.ArrayList(ptxast.Directive).init(allocator),
+            .reg_manager = RegisterManager.init(allocator),
+            .memory_loader = undefined,
+        };
+        generator_ptr.memory_loader = try MemoryLoader.init(generator_ptr, allocator);
+        return generator_ptr;
+    }
+
+    pub fn generatePTX(self: *Generator) !ptxast.Kernel {
+        for (self.program.ops.items) |op| {
+            const dest = try self.memory_loader.getLocalMatrixRegister(op.output_ids[0]);
+
+            switch (op.kind) {
+                .Add => {
+                    const a = try self.memory_loader.getLocalMatrixRegister(op.input_ids[0]);
+                    const b = try self.memory_loader.getLocalMatrixRegister(op.input_ids[1]);
+                    try self.body.append(.{
+                        .add = .{
+                            .type = .f32,
+                            .src1 = .{ .register = a },
+                            .src2 = .{ .register = b },
+                            .dest = .{ .register = dest },
+                        },
+                    });
+                },
+                .Matmul => {
+                    const a_row_regs = try self.memory_loader.getLocalRowRegisters(op.input_ids[0]);
+                    const b_col_regs = try self.memory_loader.getLocalColRegisters(op.input_ids[1]);
+
+                    for (a_row_regs, 0..) |reg, idx| {
+                        try self.body.append(.{
+                            .fma = .{
+                                .type = .f32,
+                                .dest = .{ .register = dest },
+                                .src1 = .{ .register = reg },
+                                .src2 = .{ .register = b_col_regs[idx] },
+                                .src3 = .{ .register = dest },
+                            },
+                        });
+                    }
+                },
+            }
+        }
+
+        for (self.program.params.items) |param| {
+            if (param.output == true) {
+                try self.memory_loader.storeLocalMatrixValue(param.id, try self.memory_loader.getLocalMatrixRegister(param.id));
+            }
+        }
+
+        try self.body.append(.ret);
+
+        const reg_r_decl = ptxast.Directive{ .reg = .{
+            .name = "%r",
+            .count = @intCast(self.reg_manager.reg_r_count),
+            .type = .u32,
+        } };
+        const reg_rd_decl = ptxast.Directive{ .reg = .{
+            .name = "%rd",
+            .count = @intCast(self.reg_manager.reg_rd_count),
+            .type = .b64,
+        } };
+        const reg_f_decl = ptxast.Directive{ .reg = .{
+            .name = "%f",
+            .count = @intCast(self.reg_manager.reg_f_count),
+            .type = .f32,
+        } };
+
+        try self.directives.append(reg_r_decl);
+        try self.directives.append(reg_rd_decl);
+        try self.directives.append(reg_f_decl);
+
+        return ptxast.Kernel{
+            .body = try self.body.toOwnedSlice(),
+            .directives = try self.directives.toOwnedSlice(),
+            .name = "main",
+            .params = try self.memory_loader.raw_params.toOwnedSlice(),
+        };
+    }
+};

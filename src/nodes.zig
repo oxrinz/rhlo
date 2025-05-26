@@ -16,6 +16,7 @@ pub const TensorRef = usize;
 
 pub const OperationKind = enum {
     Add,
+    Matmul,
 };
 
 pub const Operation = struct {
@@ -24,16 +25,22 @@ pub const Operation = struct {
     output_ids: []const usize,
 };
 
+pub const Parameter = struct {
+    id: usize,
+    input: bool = false,
+    output: bool = false,
+};
+
 pub const RHLOProgram = struct {
     tensor_store: std.ArrayList(Tensor),
     ops: std.ArrayList(Operation),
-    params: std.ArrayList(usize),
+    params: std.ArrayList(Parameter),
 
     pub fn init(allocator: std.mem.Allocator) !RHLOProgram {
         return .{
             .tensor_store = std.ArrayList(Tensor).init(allocator),
             .ops = std.ArrayList(Operation).init(allocator),
-            .params = std.ArrayList(usize).init(allocator),
+            .params = std.ArrayList(Parameter).init(allocator),
         };
     }
 };

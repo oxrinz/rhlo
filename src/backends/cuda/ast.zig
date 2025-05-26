@@ -33,6 +33,10 @@ pub const DataType = enum {
     f16,
     f32,
     f64,
+    b8,
+    b16,
+    b32,
+    b64,
     pred,
 
     pub fn toString(self: DataType) []const u8 {
@@ -53,10 +57,14 @@ pub const SpaceType = enum {
 
 pub const Instruction = union(enum) {
     add: AddInst,
+    mul: MulInst,
+    shl: ShiftLeftInst,
+    mov: MoveInst,
     ld: LoadInst,
     st: StoreInst,
     bra: BranchInst,
     cvta: ConvertToAddrInst,
+    fma: FusedMultiplyAddInst,
     ret,
 };
 
@@ -64,6 +72,36 @@ pub const AddInst = struct {
     dest: Operand,
     src1: Operand,
     src2: Operand,
+    type: DataType,
+    wide: bool = false,
+};
+
+pub const FusedMultiplyAddInst = struct {
+    dest: Operand,
+    src1: Operand,
+    src2: Operand,
+    src3: Operand,
+    type: DataType,
+};
+
+pub const MulInst = struct {
+    dest: Operand,
+    src1: Operand,
+    src2: Operand,
+    type: DataType,
+    wide: bool = false,
+};
+
+pub const ShiftLeftInst = struct {
+    dest: Operand,
+    src1: Operand,
+    src2: Operand,
+    type: DataType,
+};
+
+pub const MoveInst = struct {
+    dest: Operand,
+    src: Operand,
     type: DataType,
 };
 
@@ -96,14 +134,9 @@ pub const ConvertToAddrInst = struct {
 
 pub const Kernel = struct {
     name: []const u8,
-    params: []Parameter,
+    params: [][]const u8,
     body: []Instruction,
     directives: []Directive,
-};
-
-pub const Parameter = struct {
-    name: []const u8,
-    type: DataType,
 };
 
 pub const Directive = union(enum) {

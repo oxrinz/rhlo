@@ -8,12 +8,21 @@ const types = rllvm.llvm.types;
 const core = rllvm.llvm.core;
 const execution = rllvm.llvm.engine;
 
+const pretty_printer = @import("pretty-printer.zig");
 const nodes = @import("nodes.zig");
 const Builder = @import("builder.zig").Builder;
 
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
-pub fn execute(program: nodes.RHLOProgram, inputs: []*void, outputs: []*void) !void {
+// TODO: merge inputs and outputs into one params array, and memcpy based on program.params data
+// currently all inputs and outputs must be of same shape
+pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
+    // quick checks
+    for (program.tensor_store.items) |tensor| {
+        if (tensor.dimensions[0] != tensor.dimensions[1]) @panic("All tensors must be of symmetric shape");
+        if (tensor.dimensions[0] > 25) @panic("Tensors only of any dim smaller than 5 supported");
+    }
+
     // init code
     _ = target.LLVMInitializeNativeTarget();
     _ = target.LLVMInitializeNativeAsmPrinter();
@@ -41,29 +50,49 @@ pub fn execute(program: nodes.RHLOProgram, inputs: []*void, outputs: []*void) !v
     const cuda_context = try cuda.contextCreate(module, builder, cuda_device);
     _ = cuda_context;
 
-    const four: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(core.LLVMInt64Type(), 4, 0) };
-
+    // allocate d and h memory
     var h_inputs = std.ArrayList(rllvm.types.OpaqueRef).init(arena.allocator());
     var d_inputs = std.ArrayList(rllvm.types.CudaValueRef).init(arena.allocator());
-    for (inputs) |input| {
-        const h_input = rllvm.types.OpaqueRef{ .ref = core.LLVMConstIntToPtr(core.LLVMConstInt(core.LLVMInt64Type(), @intFromPtr(input), 0), core.LLVMPointerType(core.LLVMInt8Type(), 0)) };
-        try h_inputs.append(h_input);
-
-        const d_input = rllvm.types.CudaValueRef.create(builder);
-        try d_inputs.append(d_input);
-        try cuda.memAlloc(module, builder, d_input, four);
-        try cuda.copyHToD(module, builder, d_input, h_input, four);
-    }
-
     var h_outputs = std.ArrayList(rllvm.types.OpaqueRef).init(arena.allocator());
     var d_outputs = std.ArrayList(rllvm.types.CudaValueRef).init(arena.allocator());
-    for (outputs) |output| {
-        const h_output = rllvm.types.OpaqueRef{ .ref = core.LLVMConstIntToPtr(core.LLVMConstInt(core.LLVMInt64Type(), @intFromPtr(output), 0), core.LLVMPointerType(core.LLVMInt8Type(), 0)) };
-        try h_outputs.append(h_output);
+    var output_sizes = std.ArrayList(rllvm.types.IntegerRef).init(arena.allocator());
 
-        const d_output = rllvm.types.CudaValueRef.create(builder);
-        try d_outputs.append(d_output);
-        try cuda.memAlloc(module, builder, d_output, four);
+    for (program.params.items, 0..) |param, idx| {
+        var size_elements: usize = 1;
+        for (program.tensor_store.items[param.id].dimensions) |dim| {
+            size_elements *= dim;
+        }
+        const size_bytes = rllvm.types.IntegerRef{ .ref = core.LLVMConstInt(core.LLVMInt64Type(), 4 * size_elements, 0) }; // TODO: only works with 32 bit vars, make it work with any
+
+        if (param.input == true) {
+            const input = params[idx];
+            const h_input = rllvm.types.OpaqueRef{ .ref = core.LLVMConstIntToPtr(core.LLVMConstInt(core.LLVMInt64Type(), @intFromPtr(input), 0), core.LLVMPointerType(core.LLVMInt8Type(), 0)) };
+            try h_inputs.append(h_input);
+
+            const d_input = rllvm.types.CudaValueRef.create(builder);
+            try d_inputs.append(d_input);
+
+            try cuda.memAlloc(module, builder, d_input, size_bytes);
+            try cuda.copyHToD(module, builder, d_input, h_input, size_bytes);
+        }
+
+        if (param.output == true) {
+            const output = params[idx];
+            const h_output = rllvm.types.OpaqueRef{ .ref = core.LLVMConstIntToPtr(core.LLVMConstInt(core.LLVMInt64Type(), @intFromPtr(output), 0), core.LLVMPointerType(core.LLVMInt8Type(), 0)) };
+            try h_outputs.append(h_output);
+
+            const d_output = rllvm.types.CudaValueRef.create(builder);
+            try d_outputs.append(d_output);
+
+            try output_sizes.append(size_bytes);
+
+            try cuda.memAlloc(module, builder, d_output, size_bytes);
+        }
+    }
+
+    var block_dims: usize = 0;
+    for (program.tensor_store.items) |tensor| {
+        if (tensor.dimensions[0] > block_dims) block_dims = tensor.dimensions[0];
     }
 
     // gen
@@ -76,15 +105,16 @@ pub fn execute(program: nodes.RHLOProgram, inputs: []*void, outputs: []*void) !v
     const grid_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const grid_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const grid_dim_z: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
-    const block_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
-    const block_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
+    const block_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, block_dims, 0) };
+    const block_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, block_dims, 0) };
     const block_dim_z: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const shared_mem_bytes: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 0, 0) };
     const kernel_params = try std.mem.concat(arena.allocator(), rllvm.types.CudaValueRef, &[_][]rllvm.types.CudaValueRef{ d_inputs.items, d_outputs.items });
     try cuda.launchKernel(module, builder, cuda_function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y, block_dim_z, shared_mem_bytes, kernel_params);
 
+    // copy results to h
     for (d_outputs.items, 0..) |d_output, idx| {
-        try cuda.copyDToH(module, builder, d_output, h_outputs.items[idx], four);
+        try cuda.copyDToH(module, builder, d_output, h_outputs.items[idx], output_sizes.items[idx]);
     }
 
     const zero = core.LLVMConstInt(core.LLVMInt64Type(), 0, 0);
@@ -101,7 +131,7 @@ pub fn execute(program: nodes.RHLOProgram, inputs: []*void, outputs: []*void) !v
     }
     defer execution.LLVMDisposeExecutionEngine(engine);
 
-    _ = core.LLVMDumpModule(module);
+    // _ = core.LLVMDumpModule(module);
 
     const main_addr = execution.LLVMGetFunctionAddress(engine, "main");
     const MainFn = fn () callconv(.C) f32;
@@ -110,16 +140,15 @@ pub fn execute(program: nodes.RHLOProgram, inputs: []*void, outputs: []*void) !v
     _ = main_fn();
 }
 
-test "matmul" {
+test "add" {
     var builder = Builder.init(arena.allocator());
     const dtype = nodes.DataType.F32;
     const shape: nodes.Shape = &[_]usize{ 2, 2 };
     const param0 = try builder.createParameter(dtype, shape);
     const param1 = try builder.createParameter(dtype, shape);
 
-    const res1 = try builder.opAdd(param0, param1);
-    const res2 = try builder.opAdd(param0, res1);
-    try builder.createParameterFromRef(res2);
+    const result = try builder.opAdd(param0, param1);
+    try builder.createParameterFromRef(result);
 
     var input1 = try arena.allocator().alloc(f32, 4);
     input1[0] = 3.0;
@@ -133,14 +162,93 @@ test "matmul" {
     input2[3] = 4.0;
     const output = try arena.allocator().alloc(f32, 4);
 
-    var inputs = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr) };
-    var outputs = [_]*void{@ptrCast(output.ptr)};
+    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
 
     try execute(
         builder.program,
-        &inputs,
-        &outputs,
+        &params,
     );
 
-    std.debug.print("first of output: {d}\n", .{output[0]});
+    try std.testing.expect(output[0] == 12.5);
+    try std.testing.expect(output[1] == 4);
+    try std.testing.expect(output[2] == 6);
+    try std.testing.expect(output[3] == 8);
+}
+
+test "multi step add" {
+    var builder = Builder.init(arena.allocator());
+    const dtype = nodes.DataType.F32;
+    const shape: nodes.Shape = &[_]usize{ 2, 2 };
+    const param0 = try builder.createParameter(dtype, shape);
+    const param1 = try builder.createParameter(dtype, shape);
+
+    const intermediate_result = try builder.opAdd(param0, param1);
+    const result = try builder.opAdd(intermediate_result, param1);
+    try builder.createParameterFromRef(result);
+
+    var input1 = try arena.allocator().alloc(f32, 4);
+    input1[0] = 3.0;
+    input1[1] = 2.0;
+    input1[2] = 3.0;
+    input1[3] = 4.0;
+    var input2 = try arena.allocator().alloc(f32, 4);
+    input2[0] = 9.5;
+    input2[1] = 2.0;
+    input2[2] = 3.0;
+    input2[3] = 4.0;
+    const output = try arena.allocator().alloc(f32, 4);
+
+    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
+
+    try execute(
+        builder.program,
+        &params,
+    );
+
+    try std.testing.expect(output[0] == 22);
+    try std.testing.expect(output[1] == 6);
+    try std.testing.expect(output[2] == 9);
+    try std.testing.expect(output[3] == 12);
+}
+
+test "mlp" {
+    var builder = Builder.init(arena.allocator());
+    const dtype = nodes.DataType.F32;
+    const shape: nodes.Shape = &[_]usize{ 2, 2 };
+    const param0 = try builder.createParameter(dtype, shape);
+    const param1 = try builder.createParameter(dtype, shape);
+
+    const result = try builder.opMatmul(param0, param1);
+    try builder.createParameterFromRef(result);
+
+    var input1 = try arena.allocator().alloc(f32, 4);
+    input1[0] = 0.5;
+    input1[1] = 2.0;
+    input1[2] = 3.0;
+    input1[3] = 2.0;
+    var input2 = try arena.allocator().alloc(f32, 4);
+    input2[0] = 1.5;
+    input2[1] = 2.0;
+    input2[2] = 0.3;
+    input2[3] = 0.2;
+    const output = try arena.allocator().alloc(f32, 4);
+
+    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
+
+    try execute(
+        builder.program,
+        &params,
+    );
+
+    try pretty_printer.prettyPrint(builder.program, "hii.rhlo");
+
+    std.debug.print("first: {d}\n", .{output[0]});
+    std.debug.print("second: {d}\n", .{output[1]});
+    std.debug.print("third: {d}\n", .{output[2]});
+    std.debug.print("fourth: {d}\n", .{output[3]});
+
+    try std.testing.expect(output[0] == 1.35);
+    try std.testing.expect(output[1] == 1.4);
+    try std.testing.expect(output[2] == 5.1);
+    try std.testing.expect(output[3] == 6.4);
 }

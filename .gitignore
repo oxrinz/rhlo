@@ -13,5 +13,7 @@ zig-cache/
 main.ryu
 gpu.ryu
 comp.sh
+rhlo.ptx
+ptx.sh
 
 **/**.a
