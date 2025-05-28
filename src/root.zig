@@ -263,7 +263,7 @@ test "chained 2x2 gemm 2" {
     const param1 = try builder.createParameter(dtype, shape);
 
     const intermediate_result = try builder.opMatmul(param0, param1);
-    const result = try builder.opMatmul(param0, intermediate_result);
+    const result = try builder.opMatmul(param1, intermediate_result);
     try builder.createParameterFromRef(result);
 
     var input1 = try arena.allocator().alloc(f32, 4);
@@ -299,10 +299,10 @@ test "chained 2x2 gemm 2" {
     // 5.1
     // 6.4
 
-    try std.testing.expect(rounded_output[0] == 10.875);
-    try std.testing.expect(rounded_output[1] == 13.5);
-    try std.testing.expect(rounded_output[2] == 14.25);
-    try std.testing.expect(rounded_output[3] == 17.0);
+    try std.testing.expect(rounded_output[0] == 12.225);
+    try std.testing.expect(rounded_output[1] == 14.9);
+    try std.testing.expect(rounded_output[2] == 1.425);
+    try std.testing.expect(rounded_output[3] == 1.7);
 }
 
 fn roundTo3DecimalPlaces(value: f32) f32 {
