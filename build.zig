@@ -8,23 +8,23 @@ pub fn build(b: *std.Build) void {
 
     const rllvm_module = rllvm_dep.module("rllvm");
 
-    const main_module = b.createModule(.{
+    const rhlo_module = b.addModule("rhlo", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    main_module.addImport("rllvm", rllvm_module);
+    rhlo_module.addImport("rllvm", rllvm_module);
 
     const lib = b.addSharedLibrary(.{
         .name = "rhlo",
-        .root_module = main_module,
+        .root_module = rhlo_module,
         .optimize = optimize,
     });
     b.installArtifact(lib);
 
     const tests = b.addTest(.{
-        .root_module = main_module,
+        .root_module = rhlo_module,
         .optimize = optimize,
     });
 

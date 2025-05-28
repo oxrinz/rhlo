@@ -49,11 +49,19 @@ pub fn emit(allocator: std.mem.Allocator, ast: ptxast.PTXAst) ![]const u8 {
             },
             .mul => |mul| {
                 try writer.print("  mul{s}.{s} {s}, {s}, {s};\n", .{
-                    if (mul.wide) ".wide" else "",
+                    mul.modifier.toString(),
                     mul.type.toString(),
                     emitOperand(mul.dest, &operand_buffer),
                     emitOperand(mul.src1, &operand_buffer),
                     emitOperand(mul.src2, &operand_buffer),
+                });
+            },
+            ._and => |_and| {
+                try writer.print("  and.{s} {s}, {s}, {s};\n", .{
+                    _and.type.toString(),
+                    emitOperand(_and.dest, &operand_buffer),
+                    emitOperand(_and.src1, &operand_buffer),
+                    emitOperand(_and.src2, &operand_buffer),
                 });
             },
             .mov => |mov| {
@@ -104,6 +112,20 @@ pub fn emit(allocator: std.mem.Allocator, ast: ptxast.PTXAst) ![]const u8 {
                     emitOperand(fma.src2, &operand_buffer),
                     emitOperand(fma.src3, &operand_buffer),
                 });
+            },
+            .shfl => |shfl| {
+                try writer.print("  shfl.sync.{s}.{s} {s}, {s}, {s}, {s}, {s};\n", .{
+                    shfl.mode.toString(),
+                    shfl.type.toString(),
+                    emitOperand(shfl.dest, &operand_buffer),
+                    emitOperand(shfl.src, &operand_buffer),
+                    emitOperand(shfl.offset_or_source, &operand_buffer),
+                    emitOperand(shfl.lane_mask, &operand_buffer),
+                    emitOperand(shfl.mask, &operand_buffer),
+                });
+            },
+            .comment => |comment| {
+                try writer.print("  // {s}\n", .{comment});
             },
             .ret => try writer.writeAll("  ret;\n"),
             else => unreachable,

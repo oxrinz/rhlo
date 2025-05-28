@@ -58,6 +58,7 @@ pub const SpaceType = enum {
 pub const Instruction = union(enum) {
     add: AddInst,
     mul: MulInst,
+    _and: AndInst,
     shl: ShiftLeftInst,
     mov: MoveInst,
     ld: LoadInst,
@@ -65,6 +66,8 @@ pub const Instruction = union(enum) {
     bra: BranchInst,
     cvta: ConvertToAddrInst,
     fma: FusedMultiplyAddInst,
+    shfl: ShuffleInst,
+    comment: []const u8,
     ret,
 };
 
@@ -74,6 +77,13 @@ pub const AddInst = struct {
     src2: Operand,
     type: DataType,
     wide: bool = false,
+};
+
+pub const AndInst = struct {
+    dest: Operand,
+    src1: Operand,
+    src2: Operand,
+    type: DataType,
 };
 
 pub const FusedMultiplyAddInst = struct {
@@ -89,7 +99,22 @@ pub const MulInst = struct {
     src1: Operand,
     src2: Operand,
     type: DataType,
-    wide: bool = false,
+    modifier: enum {
+        none,
+        lo,
+        hi,
+        wide,
+        sat,
+        pub fn toString(self: @This()) []const u8 {
+            return switch (self) {
+                .none => "",
+                .lo => ".lo",
+                .hi => ".hi",
+                .wide => ".wide",
+                .sat => ".sat",
+            };
+        }
+    } = .none,
 };
 
 pub const ShiftLeftInst = struct {
@@ -130,6 +155,32 @@ pub const ConvertToAddrInst = struct {
     type: DataType,
     dest: Operand,
     src: Operand,
+};
+
+pub const ShuffleInst = struct {
+    dest: Operand,
+    src: Operand,
+    offset_or_source: Operand,
+    lane_mask: Operand,
+    mask: Operand,
+    type: DataType,
+    mode: Mode,
+
+    pub const Mode = enum {
+        up,
+        down,
+        bfly,
+        idx,
+
+        pub fn toString(self: Mode) []const u8 {
+            return switch (self) {
+                .up => "up",
+                .down => "down",
+                .bfly => "bfly",
+                .idx => "idx",
+            };
+        }
+    };
 };
 
 pub const Kernel = struct {

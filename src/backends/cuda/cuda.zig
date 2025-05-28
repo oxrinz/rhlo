@@ -185,7 +185,7 @@ const MemoryLoader = struct {
         try self.generator.body.append(.{
             .mul = .{
                 .dest = .{ .register = self.tidx_reg.? },
-                .wide = true,
+                .modifier = .wide,
                 .src1 = .{ .register = self.raw_tidx_reg.? },
                 .src2 = .{
                     .immediate = .{ .integer = 4 },
@@ -196,7 +196,7 @@ const MemoryLoader = struct {
         try self.generator.body.append(.{
             .mul = .{
                 .dest = .{ .register = self.tidy_reg.? },
-                .wide = true,
+                .modifier = .wide,
                 .src1 = .{ .register = self.raw_tidy_reg.? },
                 .src2 = .{
                     .immediate = .{ .integer = 4 },
@@ -239,41 +239,45 @@ const MemoryLoader = struct {
         return self.local_tensor_regs.get(tensor_id).?;
     }
 
-    fn getLocalRowRegisters(self: *MemoryLoader, tensor_id: usize) ![][]const u8 {
+    fn getLocalAxisParamRegisters(self: *MemoryLoader, tensor_id: usize, axis: enum { row, col }) ![][]const u8 {
         const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
         var regs = std.ArrayList([]const u8).init(self.allocator);
 
-        // tidy 0
-        // x 0
-        // 0
-        // 0
-        //
-        // tidy 0
-        // x 1
-        // 0
-        // 4
-
-        for (0..dims[0]) |x| {
+        for (0..dims[if (axis == .row) 0 else 1]) |x| {
             const address = try self.generator.reg_manager.getRegister(.rd);
             const dim_reg = try self.generator.reg_manager.getRegister(.r);
+            const dest = try self.generator.reg_manager.getRegister(.f);
+
+            const intermediate = try self.generator.reg_manager.getRegister(.r);
+
             try self.generator.body.append(.{ .mov = .{
                 .type = .u32,
                 .dest = .{ .register = dim_reg },
-                .src = .{ .immediate = .{ .integer = @intCast(dims[1] * 4) } },
+                .src = .{ .immediate = .{ .integer = if (axis == .row) @intCast(dims[1] * 4) else @intCast(dims[0] * (x)) } },
             } });
+            if (axis == .col) {
+                try self.generator.body.append(.{ .add = .{
+                    .type = .u32,
+                    .dest = .{ .register = intermediate },
+                    .src1 = .{ .register = dim_reg },
+                    .src2 = .{ .register = self.raw_tidx_reg.? },
+                } });
+            }
             try self.generator.body.append(.{ .mul = .{
                 .type = .u32,
                 .dest = .{ .register = address },
-                .src1 = .{ .register = dim_reg },
-                .src2 = .{ .register = self.raw_tidy_reg.? },
-                .wide = true,
+                .src1 = .{ .register = if (axis == .row) dim_reg else intermediate },
+                .src2 = if (axis == .row) .{ .register = self.raw_tidy_reg.? } else .{ .immediate = .{ .integer = 4 } },
+                .modifier = .wide,
             } });
-            try self.generator.body.append(.{ .add = .{
-                .type = .u64,
-                .dest = .{ .register = address },
-                .src1 = .{ .register = address },
-                .src2 = .{ .immediate = .{ .integer = @intCast(4 * x) } },
-            } });
+            if (axis == .row) {
+                try self.generator.body.append(.{ .add = .{
+                    .type = .u64,
+                    .dest = .{ .register = address },
+                    .src1 = .{ .register = address },
+                    .src2 = .{ .immediate = .{ .integer = @intCast(4 * x) } },
+                } });
+            }
             try self.generator.body.append(.{ .add = .{
                 .type = .u64,
                 .dest = .{ .register = address },
@@ -281,7 +285,6 @@ const MemoryLoader = struct {
                 .src2 = .{ .register = self.param_address_regs.get(tensor_id).? },
             } });
 
-            const dest = try self.generator.reg_manager.getRegister(.f);
             try self.generator.body.append(.{
                 .ld = .{
                     .type = .f32,
@@ -296,63 +299,67 @@ const MemoryLoader = struct {
             try regs.append(dest);
         }
 
-        return try regs.toOwnedSlice();
+        const slice = try regs.toOwnedSlice();
+        if (axis == .row) try self.local_row_regs.put(tensor_id, slice) else try self.local_col_regs.put(tensor_id, slice);
+
+        return slice;
+    }
+
+    fn getLocalAxisRegisters(self: *MemoryLoader, tensor_id: usize, axis: enum { row, col }) ![][]const u8 {
+        const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
+        const loaded_regs = if (axis == .row) self.local_row_regs.get(tensor_id) else self.local_col_regs.get(tensor_id);
+        if (loaded_regs == null) {
+            if (try self.checkIfInputParam(tensor_id) == true) {
+                return try self.getLocalAxisParamRegisters(tensor_id, if (axis == .row) .row else .col);
+            } else {
+                const input_dest = try self.getLocalMatrixRegister(tensor_id);
+                var regs = std.ArrayList([]const u8).init(self.allocator);
+
+                for (0..dims[if (axis == .row) 0 else 1]) |x| {
+                    const dest = try self.generator.reg_manager.getRegister(.f);
+
+                    const reg = try self.generator.reg_manager.getRegister(.r);
+
+                    if (axis == .row) {
+                        try self.generator.body.append(.{ .mul = .{
+                            .type = .u32,
+                            .modifier = .lo,
+                            .dest = .{ .register = reg },
+                            .src1 = .{ .register = self.raw_tidy_reg.? },
+                            .src2 = .{ .immediate = .{ .integer = @intCast(dims[0]) } },
+                        } });
+                    }
+                    try self.generator.body.append(.{ .add = .{
+                        .type = .u32,
+                        .dest = .{ .register = reg },
+                        .src1 = .{ .register = if (axis == .row) reg else self.raw_tidx_reg.? },
+                        .src2 = .{ .immediate = .{ .integer = @intCast(if (axis == .row) x else x * dims[1]) } },
+                    } });
+
+                    try self.generator.body.append(.{ .shfl = .{
+                        .dest = .{ .register = dest },
+                        .src = .{ .register = input_dest },
+                        .offset_or_source = .{ .register = reg },
+                        .lane_mask = .{ .register = reg },
+                        .mask = .{ .immediate = .{ .integer = 0xffffffff } },
+                        .type = .b32,
+                        .mode = .idx,
+                    } });
+
+                    try regs.append(dest);
+                }
+
+                return try regs.toOwnedSlice();
+            }
+        } else return loaded_regs.?;
+    }
+
+    fn getLocalRowRegisters(self: *MemoryLoader, tensor_id: usize) ![][]const u8 {
+        return try self.getLocalAxisRegisters(tensor_id, .row);
     }
 
     fn getLocalColRegisters(self: *MemoryLoader, tensor_id: usize) ![][]const u8 {
-        const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
-        var regs = std.ArrayList([]const u8).init(self.allocator);
-
-        // tidx 1
-        // y 0
-        // 4
-        //
-
-        for (0..dims[1]) |y| {
-            const address = try self.generator.reg_manager.getRegister(.rd);
-            const dim_reg = try self.generator.reg_manager.getRegister(.r);
-            const intermediate = try self.generator.reg_manager.getRegister(.r);
-            try self.generator.body.append(.{ .mov = .{
-                .type = .u32,
-                .dest = .{ .register = dim_reg },
-                .src = .{ .immediate = .{ .integer = @intCast(dims[0] * (y)) } },
-            } });
-            try self.generator.body.append(.{ .add = .{
-                .type = .u32,
-                .dest = .{ .register = intermediate },
-                .src1 = .{ .register = dim_reg },
-                .src2 = .{ .register = self.raw_tidx_reg.? },
-            } });
-            try self.generator.body.append(.{ .mul = .{
-                .type = .u32,
-                .dest = .{ .register = address },
-                .src1 = .{ .register = intermediate },
-                .src2 = .{ .immediate = .{ .integer = 4 } },
-                .wide = true,
-            } });
-            try self.generator.body.append(.{ .add = .{
-                .type = .u64,
-                .dest = .{ .register = address },
-                .src1 = .{ .register = address },
-                .src2 = .{ .register = self.param_address_regs.get(tensor_id).? },
-            } });
-
-            const dest = try self.generator.reg_manager.getRegister(.f);
-            try self.generator.body.append(.{
-                .ld = .{
-                    .type = .f32,
-                    .space = .global,
-                    .dest = .{ .register = dest },
-                    .src = .{
-                        .register = address,
-                    },
-                },
-            });
-
-            try regs.append(dest);
-        }
-
-        return try regs.toOwnedSlice();
+        return try self.getLocalAxisRegisters(tensor_id, .col);
     }
 
     fn checkIfInputParam(self: *MemoryLoader, tensor_id: usize) !bool {

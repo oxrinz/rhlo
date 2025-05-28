@@ -211,14 +211,16 @@ test "multi step add" {
     try std.testing.expect(output[3] == 12);
 }
 
-test "mlp" {
+// TODO: fix numerical inaccuracy in these tests
+test "chained 2x2 gemm" {
     var builder = Builder.init(arena.allocator());
     const dtype = nodes.DataType.F32;
     const shape: nodes.Shape = &[_]usize{ 2, 2 };
     const param0 = try builder.createParameter(dtype, shape);
     const param1 = try builder.createParameter(dtype, shape);
 
-    const result = try builder.opMatmul(param0, param1);
+    const intermediate_result = try builder.opMatmul(param0, param1);
+    const result = try builder.opMatmul(intermediate_result, param1);
     try builder.createParameterFromRef(result);
 
     var input1 = try arena.allocator().alloc(f32, 4);
@@ -240,15 +242,69 @@ test "mlp" {
         &params,
     );
 
-    try pretty_printer.prettyPrint(builder.program, "hii.rhlo");
+    const rounded_output = [_]f32{
+        roundTo3DecimalPlaces(output[0]),
+        roundTo3DecimalPlaces(output[1]),
+        roundTo3DecimalPlaces(output[2]),
+        roundTo3DecimalPlaces(output[3]),
+    };
 
-    std.debug.print("first: {d}\n", .{output[0]});
-    std.debug.print("second: {d}\n", .{output[1]});
-    std.debug.print("third: {d}\n", .{output[2]});
-    std.debug.print("fourth: {d}\n", .{output[3]});
+    try std.testing.expect(rounded_output[0] == 2.445);
+    try std.testing.expect(rounded_output[1] == 2.98);
+    try std.testing.expect(rounded_output[2] == 9.57);
+    try std.testing.expect(rounded_output[3] == 11.48);
+}
 
-    try std.testing.expect(output[0] == 1.35);
-    try std.testing.expect(output[1] == 1.4);
-    try std.testing.expect(output[2] == 5.1);
-    try std.testing.expect(output[3] == 6.4);
+test "chained 2x2 gemm 2" {
+    var builder = Builder.init(arena.allocator());
+    const dtype = nodes.DataType.F32;
+    const shape: nodes.Shape = &[_]usize{ 2, 2 };
+    const param0 = try builder.createParameter(dtype, shape);
+    const param1 = try builder.createParameter(dtype, shape);
+
+    const intermediate_result = try builder.opMatmul(param0, param1);
+    const result = try builder.opMatmul(param0, intermediate_result);
+    try builder.createParameterFromRef(result);
+
+    var input1 = try arena.allocator().alloc(f32, 4);
+    input1[0] = 0.5;
+    input1[1] = 2.0;
+    input1[2] = 3.0;
+    input1[3] = 2.0;
+    var input2 = try arena.allocator().alloc(f32, 4);
+    input2[0] = 1.5;
+    input2[1] = 2.0;
+    input2[2] = 0.3;
+    input2[3] = 0.2;
+    const output = try arena.allocator().alloc(f32, 4);
+
+    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
+
+    try execute(
+        builder.program,
+        &params,
+    );
+
+    // try pretty_printer.prettyPrint(builder.program, "hi.rhlo");
+
+    const rounded_output = [_]f32{
+        roundTo3DecimalPlaces(output[0]),
+        roundTo3DecimalPlaces(output[1]),
+        roundTo3DecimalPlaces(output[2]),
+        roundTo3DecimalPlaces(output[3]),
+    };
+
+    // 1.35
+    // 1.4
+    // 5.1
+    // 6.4
+
+    try std.testing.expect(rounded_output[0] == 10.875);
+    try std.testing.expect(rounded_output[1] == 13.5);
+    try std.testing.expect(rounded_output[2] == 14.25);
+    try std.testing.expect(rounded_output[3] == 17.0);
+}
+
+fn roundTo3DecimalPlaces(value: f32) f32 {
+    return @floatCast(@round(@as(f32, @floatCast(value)) * 1000.0) / 1000.0);
 }
