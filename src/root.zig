@@ -19,7 +19,6 @@ var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
     // quick checks
     for (program.tensor_store.items) |tensor| {
-        if (tensor.dimensions[0] != tensor.dimensions[1]) @panic("All tensors must be of symmetric shape");
         if (tensor.dimensions[0] > 25) @panic("Tensors only of any dim smaller than 5 supported");
     }
 
@@ -90,10 +89,7 @@ pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
         }
     }
 
-    var block_dims: usize = 0;
-    for (program.tensor_store.items) |tensor| {
-        if (tensor.dimensions[0] > block_dims) block_dims = tensor.dimensions[0];
-    }
+    const block_dims: usize = program.tensor_store.items[program.params.items[program.params.items.len - 1].id].dimensions[0];
 
     // gen
     const ptx = try @import("backends/cuda/cuda.zig").generatePTX(module, program);
@@ -140,171 +136,6 @@ pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
     _ = main_fn();
 }
 
-test "add" {
-    var builder = Builder.init(arena.allocator());
-    const dtype = nodes.DataType.F32;
-    const shape: nodes.Shape = &[_]usize{ 2, 2 };
-    const param0 = try builder.createParameter(dtype, shape);
-    const param1 = try builder.createParameter(dtype, shape);
-
-    const result = try builder.opAdd(param0, param1);
-    try builder.createParameterFromRef(result);
-
-    var input1 = try arena.allocator().alloc(f32, 4);
-    input1[0] = 3.0;
-    input1[1] = 2.0;
-    input1[2] = 3.0;
-    input1[3] = 4.0;
-    var input2 = try arena.allocator().alloc(f32, 4);
-    input2[0] = 9.5;
-    input2[1] = 2.0;
-    input2[2] = 3.0;
-    input2[3] = 4.0;
-    const output = try arena.allocator().alloc(f32, 4);
-
-    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
-
-    try execute(
-        builder.program,
-        &params,
-    );
-
-    try std.testing.expect(output[0] == 12.5);
-    try std.testing.expect(output[1] == 4);
-    try std.testing.expect(output[2] == 6);
-    try std.testing.expect(output[3] == 8);
-}
-
-test "multi step add" {
-    var builder = Builder.init(arena.allocator());
-    const dtype = nodes.DataType.F32;
-    const shape: nodes.Shape = &[_]usize{ 2, 2 };
-    const param0 = try builder.createParameter(dtype, shape);
-    const param1 = try builder.createParameter(dtype, shape);
-
-    const intermediate_result = try builder.opAdd(param0, param1);
-    const result = try builder.opAdd(intermediate_result, param1);
-    try builder.createParameterFromRef(result);
-
-    var input1 = try arena.allocator().alloc(f32, 4);
-    input1[0] = 3.0;
-    input1[1] = 2.0;
-    input1[2] = 3.0;
-    input1[3] = 4.0;
-    var input2 = try arena.allocator().alloc(f32, 4);
-    input2[0] = 9.5;
-    input2[1] = 2.0;
-    input2[2] = 3.0;
-    input2[3] = 4.0;
-    const output = try arena.allocator().alloc(f32, 4);
-
-    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
-
-    try execute(
-        builder.program,
-        &params,
-    );
-
-    try std.testing.expect(output[0] == 22);
-    try std.testing.expect(output[1] == 6);
-    try std.testing.expect(output[2] == 9);
-    try std.testing.expect(output[3] == 12);
-}
-
-// TODO: fix numerical inaccuracy in these tests
-test "chained 2x2 gemm" {
-    var builder = Builder.init(arena.allocator());
-    const dtype = nodes.DataType.F32;
-    const shape: nodes.Shape = &[_]usize{ 2, 2 };
-    const param0 = try builder.createParameter(dtype, shape);
-    const param1 = try builder.createParameter(dtype, shape);
-
-    const intermediate_result = try builder.opMatmul(param0, param1);
-    const result = try builder.opMatmul(intermediate_result, param1);
-    try builder.createParameterFromRef(result);
-
-    var input1 = try arena.allocator().alloc(f32, 4);
-    input1[0] = 0.5;
-    input1[1] = 2.0;
-    input1[2] = 3.0;
-    input1[3] = 2.0;
-    var input2 = try arena.allocator().alloc(f32, 4);
-    input2[0] = 1.5;
-    input2[1] = 2.0;
-    input2[2] = 0.3;
-    input2[3] = 0.2;
-    const output = try arena.allocator().alloc(f32, 4);
-
-    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
-
-    try execute(
-        builder.program,
-        &params,
-    );
-
-    const rounded_output = [_]f32{
-        roundTo3DecimalPlaces(output[0]),
-        roundTo3DecimalPlaces(output[1]),
-        roundTo3DecimalPlaces(output[2]),
-        roundTo3DecimalPlaces(output[3]),
-    };
-
-    try std.testing.expect(rounded_output[0] == 2.445);
-    try std.testing.expect(rounded_output[1] == 2.98);
-    try std.testing.expect(rounded_output[2] == 9.57);
-    try std.testing.expect(rounded_output[3] == 11.48);
-}
-
-test "chained 2x2 gemm 2" {
-    var builder = Builder.init(arena.allocator());
-    const dtype = nodes.DataType.F32;
-    const shape: nodes.Shape = &[_]usize{ 2, 2 };
-    const param0 = try builder.createParameter(dtype, shape);
-    const param1 = try builder.createParameter(dtype, shape);
-
-    const intermediate_result = try builder.opMatmul(param0, param1);
-    const result = try builder.opMatmul(param1, intermediate_result);
-    try builder.createParameterFromRef(result);
-
-    var input1 = try arena.allocator().alloc(f32, 4);
-    input1[0] = 0.5;
-    input1[1] = 2.0;
-    input1[2] = 3.0;
-    input1[3] = 2.0;
-    var input2 = try arena.allocator().alloc(f32, 4);
-    input2[0] = 1.5;
-    input2[1] = 2.0;
-    input2[2] = 0.3;
-    input2[3] = 0.2;
-    const output = try arena.allocator().alloc(f32, 4);
-
-    var params = [_]*void{ @ptrCast(input1.ptr), @ptrCast(input2.ptr), @ptrCast(output.ptr) };
-
-    try execute(
-        builder.program,
-        &params,
-    );
-
-    // try pretty_printer.prettyPrint(builder.program, "hi.rhlo");
-
-    const rounded_output = [_]f32{
-        roundTo3DecimalPlaces(output[0]),
-        roundTo3DecimalPlaces(output[1]),
-        roundTo3DecimalPlaces(output[2]),
-        roundTo3DecimalPlaces(output[3]),
-    };
-
-    // 1.35
-    // 1.4
-    // 5.1
-    // 6.4
-
-    try std.testing.expect(rounded_output[0] == 12.225);
-    try std.testing.expect(rounded_output[1] == 14.9);
-    try std.testing.expect(rounded_output[2] == 1.425);
-    try std.testing.expect(rounded_output[3] == 1.7);
-}
-
-fn roundTo3DecimalPlaces(value: f32) f32 {
-    return @floatCast(@round(@as(f32, @floatCast(value)) * 1000.0) / 1000.0);
+test "all" {
+    _ = @import("tests.zig");
 }

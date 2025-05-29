@@ -62,11 +62,32 @@ pub const Builder = struct {
         const a_tensor = tensor_store[a];
         const b_tensor = tensor_store[b];
 
-        if (!std.mem.eql(usize, a_tensor.dimensions, b_tensor.dimensions)) unreachable;
+        if (a_tensor.dimensions.len < 2 or b_tensor.dimensions.len < 2) {
+            return error.InvalidTensorDimensions;
+        }
+
+        const m = a_tensor.dimensions[0];
+        const n_a = a_tensor.dimensions[1];
+        const n_b = b_tensor.dimensions[0];
+        const p = b_tensor.dimensions[1];
+
+        if (n_a != n_b) {
+            return error.IncompatibleDimensions;
+        }
+
+        const max_leading_dims = @max(a_tensor.dimensions.len, b_tensor.dimensions.len) - 2;
+        var output_dims = try self.allocator.alloc(usize, max_leading_dims + 2);
+
+        if (max_leading_dims > 0) {
+            @memcpy(output_dims[0..max_leading_dims], a_tensor.dimensions[0..max_leading_dims]);
+        }
+
+        output_dims[max_leading_dims] = m;
+        output_dims[max_leading_dims + 1] = p;
 
         const output_id = tensor_store.len;
         try self.program.tensor_store.append(.{
-            .dimensions = a_tensor.dimensions,
+            .dimensions = output_dims,
             .dtype = a_tensor.dtype,
         });
 

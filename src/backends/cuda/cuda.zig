@@ -243,7 +243,7 @@ const MemoryLoader = struct {
         const dims = self.generator.program.tensor_store.items[tensor_id].dimensions;
         var regs = std.ArrayList([]const u8).init(self.allocator);
 
-        for (0..dims[if (axis == .row) 0 else 1]) |x| {
+        for (0..dims[if (axis == .row) 1 else 0]) |x| {
             const address = try self.generator.reg_manager.getRegister(.rd);
             const dim_reg = try self.generator.reg_manager.getRegister(.r);
             const dest = try self.generator.reg_manager.getRegister(.f);
@@ -253,7 +253,7 @@ const MemoryLoader = struct {
             try self.generator.body.append(.{ .mov = .{
                 .type = .u32,
                 .dest = .{ .register = dim_reg },
-                .src = .{ .immediate = .{ .integer = if (axis == .row) @intCast(dims[1] * 4) else @intCast(dims[0] * (x)) } },
+                .src = .{ .immediate = .{ .integer = if (axis == .row) @intCast(dims[1] * 4) else @intCast(dims[1] * (x)) } },
             } });
             if (axis == .col) {
                 try self.generator.body.append(.{ .add = .{
@@ -419,12 +419,12 @@ const Generator = struct {
                     const a_row_regs = try self.memory_loader.getLocalRowRegisters(op.input_ids[0]);
                     const b_col_regs = try self.memory_loader.getLocalColRegisters(op.input_ids[1]);
 
-                    for (a_row_regs, 0..) |reg, idx| {
+                    for (a_row_regs, 0..) |x, idx| {
                         try self.body.append(.{
                             .fma = .{
                                 .type = .f32,
                                 .dest = .{ .register = dest },
-                                .src1 = .{ .register = reg },
+                                .src1 = .{ .register = x },
                                 .src2 = .{ .register = b_col_regs[idx] },
                                 .src3 = .{ .register = dest },
                             },
