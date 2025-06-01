@@ -22,6 +22,14 @@ pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
         if (tensor.dimensions[0] > 25) @panic("Tensors only of any dim smaller than 5 supported");
     }
 
+    var output_count: i8 = 0;
+    for (program.params.items) |param| {
+        if (param.output == true) {
+            output_count += 1;
+        }
+        if (output_count >= 2) @panic("Only one output supported");
+    }
+
     // init code
     _ = target.LLVMInitializeNativeTarget();
     _ = target.LLVMInitializeNativeAsmPrinter();
@@ -89,7 +97,7 @@ pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
         }
     }
 
-    const block_dims: usize = program.tensor_store.items[program.params.items[program.params.items.len - 1].id].dimensions[0];
+    const output_dims = program.tensor_store.items[program.params.items[program.params.items.len - 1].id].dimensions;
 
     // gen
     const ptx = try @import("backends/cuda/cuda.zig").generatePTX(module, program);
@@ -101,8 +109,8 @@ pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
     const grid_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const grid_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const grid_dim_z: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
-    const block_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, block_dims, 0) };
-    const block_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, block_dims, 0) };
+    const block_dim_x: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, output_dims[0], 0) };
+    const block_dim_y: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, output_dims[1], 0) };
     const block_dim_z: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 1, 0) };
     const shared_mem_bytes: rllvm.types.IntegerRef = .{ .ref = core.LLVMConstInt(int_type, 0, 0) };
     const kernel_params = try std.mem.concat(arena.allocator(), rllvm.types.CudaValueRef, &[_][]rllvm.types.CudaValueRef{ d_inputs.items, d_outputs.items });
