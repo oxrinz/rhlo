@@ -14,8 +14,6 @@ const Builder = @import("builder.zig").Builder;
 
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
-// TODO: merge inputs and outputs into one params array, and memcpy based on program.params data
-// currently all inputs and outputs must be of same shape
 pub fn execute(program: nodes.RHLOProgram, params: []*void) !void {
     // quick checks
     for (program.tensor_store.items) |tensor| {

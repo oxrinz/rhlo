@@ -1,3 +1,5 @@
 # RHLO
 
-Machine learning IR compiler primarily for [RyuLang](https://github.com/oxrinz/ryulang)
+Machine learning compiler, merged into [RyuLang](https://github.com/oxrinz/ryulang)
+
+This repo no longer active
